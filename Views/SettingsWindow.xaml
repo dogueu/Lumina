@@ -1,0 +1,116 @@
+<ui:FluentWindow x:Class="Lumina.Views.SettingsWindow"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 Title="Lumina Ayarları"
+                 Width="880"
+                 Height="820"
+                 MinWidth="520"
+                 MinHeight="560"
+                 WindowStartupLocation="CenterScreen"
+                 WindowBackdropType="Mica"
+                 WindowCornerPreference="Round"
+                 ExtendsContentIntoTitleBar="True">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0" Title="Lumina Ayarları" ShowMaximize="False" />
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="28,8,28,16">
+
+                <TextBlock Text="Parlaklık" FontSize="14" FontWeight="SemiBold" Margin="0,8,0,8" />
+
+                <ui:CardControl Margin="0,0,0,6">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="Değişim adımı" FontWeight="SemiBold" />
+                            <TextBlock Text="Fare tekerleği ve her tuş basımında parlaklığın değişeceği yüzde"
+                                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:NumberBox x:Name="StepBox" Width="120" Minimum="1" Maximum="50"
+                                  SmallChange="1" LargeChange="5" MaxDecimalPlaces="0"
+                                  Value="5" />
+                </ui:CardControl>
+
+                <TextBlock Text="Monitör isimleri" FontSize="14" FontWeight="SemiBold" Margin="0,18,0,8" />
+                <TextBlock Text="Algılanan monitörlere özel isimler atayabilirsiniz (boş bırakılırsa donanım adı kullanılır):"
+                           Opacity="0.7" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap" />
+
+                <StackPanel x:Name="MonitorListPanel" Margin="0,0,0,6" />
+                <TextBlock x:Name="NoMonitorsText" Text="Şu anda algılanmış DDC/CI monitör bulunmuyor."
+                           Opacity="0.6" FontSize="12" Margin="4,2,0,6" Visibility="Collapsed" />
+
+                <TextBlock Text="Klavye kısayolları" FontSize="14" FontWeight="SemiBold" Margin="0,18,0,8" />
+
+                <ui:CardControl Margin="0,0,0,6">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="Parlaklığı artır" FontWeight="SemiBold" />
+                            <TextBlock Text="Kutuya tıklayıp tuşa (ör. F9) veya tuş kombinasyonuna basın"
+                                       Opacity="0.7" FontSize="12" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:TextBox x:Name="IncreaseBox" Width="200" IsReadOnly="True"
+                                Tag="Increase" PlaceholderText="Kısayola basın"
+                                PreviewKeyDown="OnHotkeyKeyDown" />
+                </ui:CardControl>
+
+                <ui:CardControl Margin="0,0,0,6">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="Parlaklığı azalt" FontWeight="SemiBold" />
+                            <TextBlock Text="Tek tuş (ör. F8) veya Shift / Ctrl / Alt kombinasyonu kullanabilirsiniz"
+                                       Opacity="0.7" FontSize="12" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:TextBox x:Name="DecreaseBox" Width="200" IsReadOnly="True"
+                                Tag="Decrease" PlaceholderText="Kısayola basın"
+                                PreviewKeyDown="OnHotkeyKeyDown" />
+                </ui:CardControl>
+
+                <TextBlock Text="Genel" FontSize="14" FontWeight="SemiBold" Margin="0,18,0,8" />
+
+                <ui:CardControl Margin="0,0,0,6">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="Windows ile başlat" FontWeight="SemiBold" />
+                            <TextBlock Text="Oturum açıldığında Lumina otomatik olarak tepsiye yerleşir"
+                                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="StartupToggle" />
+                </ui:CardControl>
+
+                <ui:CardControl Margin="0,0,0,6">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="Ekran göstergesi (OSD)" FontWeight="SemiBold" />
+                            <TextBlock Text="Kısayol veya tepsi tekerleği ile değişimde parlaklık seviyesini göster"
+                                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="OsdToggle" />
+                </ui:CardControl>
+
+                <TextBlock x:Name="StatusText" Margin="2,14,2,0" TextWrapping="Wrap" Visibility="Collapsed" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2" Margin="28,8,28,20">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <ui:Button Grid.Column="0" Content="Varsayılanlara dön" Click="OnResetClick" />
+            <ui:Button Grid.Column="2" Content="Kaydet" Appearance="Primary" MinWidth="110"
+                       Click="OnSaveClick" />
+        </Grid>
+    </Grid>
+</ui:FluentWindow>

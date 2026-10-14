@@ -1,0 +1,33 @@
+## Derleme ve Yayın Çıktıları (.NET / C#)
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+[Pp]ackages/
+
+## Visual Studio & IDE Dosyaları
+.vs/
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.docstates
+
+## Geçici ve Sistem Dosyaları
+*.tmp
+*.log
+*.bak
+*.cache
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+## .NET Crash Dumps
+*.dmp
+*.mdmp
