@@ -31,7 +31,7 @@
 
 ### 1. Portable Single-File (Recommended)
 Zero installation or dependencies required:
-1. Download the latest `Lumina.exe` from the [Releases](../../releases) section.
+1. Download the latest `Lumina.exe` from the [Releases](https://github.com/dogueu/Lumina/releases) section.
 2. Place it in a permanent folder (e.g. *Documents* or *C:\Tools\Lumina*).
 3. Double-click to run. Lumina immediately nests in the system tray!
 

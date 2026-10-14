@@ -31,7 +31,7 @@
 
 ### 1. Hazır Taşınabilir Sürüm (Portable Single-File - Önerilen)
 Hiçbir kurulum veya ek paket gerektirmez:
-1. **Releases** bölümünden en güncel `Lumina.exe` dosyasını indirin.
+1. [**Releases (Sürümler)**](https://github.com/dogueu/Lumina/releases) bölümünden en güncel `Lumina.exe` dosyasını indirin.
 2. Dosyayı dilediğiniz bir klasöre (örn. *Belgelerim* veya *C:\Programlar\Lumina*) koyun.
 3. Çift tıklayarak çalıştırın; Lumina sağ alt sistem tepsisine yerleşecektir!
 
