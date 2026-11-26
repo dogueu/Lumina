@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Lumina.Models;
 using Lumina.Native;
@@ -31,7 +30,6 @@ internal sealed class HotkeyService : IDisposable
     public event Action? IncreaseRequested;
     public event Action? DecreaseRequested;
 
-    /// <summary>Son kayıt hatasının (Win32) açıklaması; çakışma durumunda kullanıcıya gösterilir.</summary>
     public string? LastError { get; private set; }
 
     public HotkeyRegistrationResult Register(HotkeyGesture increase, HotkeyGesture decrease)
@@ -53,7 +51,7 @@ internal sealed class HotkeyService : IDisposable
 
             int error = Marshal.GetLastWin32Error();
             LastError = (LastError is null ? "" : LastError + " ")
-                        + (error == 1409
+                        + (error == User32.ERROR_HOTKEY_ALREADY_REGISTERED
                             ? $"“{label}” kısayolu ({gesture}) başka bir uygulama tarafından kullanılıyor."
                             : $"“{label}” kısayolu ({gesture}) kaydedilemedi: {new Win32Exception(error).Message}");
         }
@@ -62,12 +60,13 @@ internal sealed class HotkeyService : IDisposable
             LastError = (LastError is null ? "" : LastError + " ") + ex.Message;
         }
 
-        Debug.WriteLine($"[Lumina] Kısayol kaydı başarısız: {label} ({gesture})");
+        AppDiagnostics.Trace($"Kısayol kaydı başarısız: {label} ({gesture})");
         return false;
     }
 
     private void UnregisterAll()
     {
+        if (_window.Handle == IntPtr.Zero) return;
         User32.UnregisterHotKey(_window.Handle, IncreaseId);
         User32.UnregisterHotKey(_window.Handle, DecreaseId);
     }

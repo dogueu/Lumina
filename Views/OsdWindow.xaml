@@ -1,13 +1,11 @@
 <Window x:Class="Lumina.Views.OsdWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:svc="clr-namespace:Lumina.Services"
         Title="Lumina OSD"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
-        OverridesDefaultStyle="True"
-        Style="{x:Null}"
         ResizeMode="NoResize"
         ShowInTaskbar="False"
         ShowActivated="False"
@@ -15,61 +13,65 @@
         Focusable="False"
         IsHitTestVisible="False"
         SizeToContent="WidthAndHeight"
-        WindowStartupLocation="Manual">
-    <Window.Resources>
-        <!-- WPF-UI'ın Window arka planını veya stilini ezmesini engelle -->
-        <Style TargetType="{x:Type Window}">
-            <Setter Property="Background" Value="{x:Static Brushes.Transparent}" />
-        </Style>
-    </Window.Resources>
-    <Window.Template>
-        <ControlTemplate TargetType="{x:Type Window}">
-            <ContentPresenter />
-        </ControlTemplate>
-    </Window.Template>
+        WindowStartupLocation="Manual"
+        FontFamily="Segoe UI Variable Text, Segoe UI"
+        TextOptions.TextFormattingMode="Display">
     <Border x:Name="Card"
             Width="192"
             Height="46"
-            Margin="0,0,0,8"
             Padding="14,0,14,0"
             CornerRadius="8"
-            BorderThickness="0"
-            SnapsToDevicePixels="True"
-            RenderTransformOrigin="0.5,0.5">
-        <Border.RenderTransform>
-            <TranslateTransform x:Name="CardTransform" Y="0" />
-        </Border.RenderTransform>
-        <Grid VerticalAlignment="Center">
+            BorderThickness="1"
+            Background="{DynamicResource Osd.Tint}"
+            BorderBrush="{DynamicResource Osd.Stroke}"
+            SnapsToDevicePixels="True">
+        <Grid x:Name="CardBody" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+            <Grid.RenderTransform>
+                <TranslateTransform x:Name="BodyTransform" Y="0" />
+            </Grid.RenderTransform>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <ui:SymbolIcon x:Name="SunIcon" Symbol="WeatherSunny24" FontSize="16"
-                           Grid.Column="0" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <!-- Güneş ikonu -->
+            <Viewbox Grid.Column="0" Width="16" Height="16" Margin="0,0,10,0" VerticalAlignment="Center">
+                <Path Width="20" Height="20"
+                      Data="{x:Static svc:Icons.Sun}"
+                      Fill="{DynamicResource Osd.IconBrush}" />
+            </Viewbox>
 
-            <ProgressBar x:Name="Level" Grid.Column="1" Height="4" Minimum="0" Maximum="100"
-                         VerticalAlignment="Center">
-                <ProgressBar.Template>
-                    <ControlTemplate TargetType="ProgressBar">
-                        <Grid>
-                            <Border Background="{TemplateBinding Background}" CornerRadius="2" />
-                            <Border x:Name="PART_Track">
-                                <Border x:Name="PART_Indicator"
-                                        HorizontalAlignment="Left"
-                                        Background="{TemplateBinding Foreground}"
-                                        CornerRadius="2" />
-                            </Border>
-                        </Grid>
-                    </ControlTemplate>
-                </ProgressBar.Template>
-            </ProgressBar>
+            <!-- Parlaklık çubuğu -->
+            <Border Grid.Column="1" Margin="0" Height="4" CornerRadius="2"
+                    Background="{DynamicResource Osd.Track}"
+                    VerticalAlignment="Center">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="FillCol" Width="0*" />
+                        <ColumnDefinition x:Name="RestCol" Width="100*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" CornerRadius="2" Background="{DynamicResource Slider.Fill}">
+                        <Border.Effect>
+                            <DropShadowEffect ShadowDepth="0" BlurRadius="6"
+                                              Color="{DynamicResource Ember.Color}"
+                                              Opacity="{DynamicResource Ember.GlowOpacity}" />
+                        </Border.Effect>
+                    </Border>
+                </Grid>
+            </Border>
 
-            <TextBlock x:Name="PercentText" Grid.Column="2" TextAlignment="Right"
+            <!-- Tabular değer -->
+            <TextBlock x:Name="PercentText"
+                       Grid.Column="2"
                        Width="24"
-                       FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14"
-                       FontWeight="Normal" VerticalAlignment="Center" Margin="6,-1,0,0" />
+                       TextAlignment="Right"
+                       FontFamily="Segoe UI Variable Text, Segoe UI"
+                       FontSize="14" FontWeight="Normal"
+                       Typography.NumeralAlignment="Tabular"
+                       Foreground="{DynamicResource Text.Primary}"
+                       Margin="6,-1,0,0"
+                       VerticalAlignment="Center" />
         </Grid>
     </Border>
 </Window>

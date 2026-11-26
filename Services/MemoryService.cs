@@ -4,12 +4,13 @@ using Lumina.Native;
 namespace Lumina.Services;
 
 /// <summary>
-/// Arka plandaki bellek ayak izini küçük tutar: etkinlik bittikten sonra (gecikmeli, tek seferlik)
-/// GC'yi sıkıştırır ve çalışma kümesini (working set) işletim sistemine geri verir.
+/// Etkinlik bittikten sonra (gecikmeli, tek seferlik) arka planda belleği sıkıştırır ve
+/// çalışma kümesini işletim sistemine geri verir.
 /// </summary>
 internal static class MemoryService
 {
     private static DispatcherTimer? _timer;
+    private static int _trimming;
 
     public static void ScheduleTrim(int delaySeconds = 6)
     {
@@ -19,22 +20,40 @@ internal static class MemoryService
         _timer.Start();
     }
 
+    public static void Stop() => _timer?.Stop();
+
     private static DispatcherTimer CreateTimer()
     {
         var timer = new DispatcherTimer(DispatcherPriority.ApplicationIdle);
         timer.Tick += (_, _) =>
         {
             timer.Stop();
-            Trim();
+            TriggerTrimAsync();
         };
         return timer;
     }
 
-    private static void Trim()
+    private static void TriggerTrimAsync()
     {
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
-        GC.WaitForPendingFinalizers();
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
-        Kernel32.SetProcessWorkingSetSize(Kernel32.GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+        if (Interlocked.Exchange(ref _trimming, 1) != 0) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                Kernel32.SetProcessWorkingSetSize(Kernel32.GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+            }
+            catch (Exception ex)
+            {
+                AppDiagnostics.Trace($"Bellek sıkıştırma hatası: {ex.Message}");
+            }
+            finally
+            {
+                Volatile.Write(ref _trimming, 0);
+            }
+        });
     }
 }

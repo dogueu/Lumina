@@ -1,7 +1,7 @@
-using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Windows.Threading;
 using Lumina.Models;
 
 namespace Lumina.Services;
@@ -10,13 +10,20 @@ namespace Lumina.Services;
 [JsonSerializable(typeof(AppSettings))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(Dictionary<string, int>))]
+[JsonSerializable(typeof(HashSet<string>))]
+[JsonSerializable(typeof(List<string>))]
 internal sealed partial class SettingsJsonContext : JsonSerializerContext;
 
 /// <summary>Ayarları %AppData%\Lumina\appsettings.json dosyasında saklar.</summary>
 internal sealed class SettingsService
 {
+    private const int SaveDebounceMs = 250;
+
     private readonly string _directory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Lumina");
+
+    private DispatcherTimer? _saveTimer;
+    private bool _dirty;
 
     private string FilePath => Path.Combine(_directory, "appsettings.json");
 
@@ -40,7 +47,7 @@ internal sealed class SettingsService
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Lumina] Ayarlar okunamadı, varsayılanlar kullanılacak: {ex.Message}");
+            AppDiagnostics.Trace($"Ayarlar okunamadı, varsayılanlar kullanılacak: {ex.Message}");
         }
 
         Current = new AppSettings();
@@ -66,30 +73,43 @@ internal sealed class SettingsService
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Lumina] Ayarlar kaydedilemedi: {ex.Message}");
+            AppDiagnostics.Trace($"Ayarlar kaydedilemedi: {ex.Message}");
             return false;
         }
     }
 
-    private System.Windows.Threading.DispatcherTimer? _saveTimer;
-
-    /// <summary>Parlaklık değişimleri gibi sık tetiklenen ayarları 1 saniye debounce ile diske kaydeder.</summary>
+    /// <summary>Parlaklık değişimleri gibi sık tetiklenen ayarları 250 ms debounce ile diske kaydeder.</summary>
     public void ScheduleSave()
     {
+        _dirty = true;
         if (_saveTimer is null)
         {
-            _saveTimer = new System.Windows.Threading.DispatcherTimer(System.Windows.Threading.DispatcherPriority.Background)
+            _saveTimer = new DispatcherTimer(DispatcherPriority.Background)
             {
-                Interval = TimeSpan.FromSeconds(1)
+                Interval = TimeSpan.FromMilliseconds(SaveDebounceMs)
             };
             _saveTimer.Tick += (_, _) =>
             {
                 _saveTimer.Stop();
+                _dirty = false;
                 Save(Current);
             };
         }
 
         _saveTimer.Stop();
         _saveTimer.Start();
+    }
+
+    /// <summary>Uygulama kapanırken veya oturum sonlanırken bekleyen değişiklikleri anında diske yazar.</summary>
+    public void Flush()
+    {
+        if (_saveTimer is not null)
+            _saveTimer.Stop();
+
+        if (_dirty)
+        {
+            _dirty = false;
+            Save(Current);
+        }
     }
 }

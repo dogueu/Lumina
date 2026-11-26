@@ -28,6 +28,10 @@ ehthumbs.db
 $RECYCLE.BIN/
 .DS_Store
 
-## .NET Crash Dumps
+## .NET Crash Dumps & Test / Paket Çıktıları
 *.dmp
 *.mdmp
+*.nupkg
+TestResults/
+appsettings.json
+last-crash.log

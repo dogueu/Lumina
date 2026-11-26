@@ -2,7 +2,9 @@ using Microsoft.Win32;
 
 namespace Lumina.Services;
 
-/// <summary>HKCU\Software\Microsoft\Windows\CurrentVersion\Run anahtarı ile "Windows ile başlat".</summary>
+/// <summary>
+/// <c>HKCU\Software\Microsoft\Windows\CurrentVersion\Run</c> altında "Windows ile başlat" kaydını yönetir.
+/// </summary>
 internal sealed class StartupService
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -19,11 +21,13 @@ internal sealed class StartupService
         }
     }
 
-    /// <summary>Kayıtlı yol bu .exe'nin yolundan farklıysa (uygulama taşınmış) false döner.</summary>
+    /// <summary>Kayıtlı yol bu .exe'nin yolundan farklıysa false döner.</summary>
     public bool IsPathCurrent
     {
         get
         {
+            if (string.IsNullOrEmpty(Environment.ProcessPath)) return false;
+
             using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
             return key?.GetValue(ValueName) is string value
                    && string.Equals(value, ExpectedCommand, StringComparison.OrdinalIgnoreCase);

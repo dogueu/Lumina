@@ -163,6 +163,9 @@ internal static class User32
     internal const int WM_SETTINGCHANGE = 0x001A;
     internal const int WM_POWERBROADCAST = 0x0218;
     internal const int WM_CONTEXTMENU = 0x007B;
+    internal const int WM_WINDOWPOSCHANGED = 0x0047;
+    internal const int WM_NCHITTEST = 0x0084;
+    internal const int WM_MOUSEACTIVATE = 0x0021;
     internal const int WM_LBUTTONUP = 0x0202;
     internal const int WM_RBUTTONUP = 0x0205;
     internal const int WM_LBUTTONDOWN = 0x0201;
@@ -182,14 +185,27 @@ internal static class User32
     internal const uint MONITOR_DEFAULTTONEAREST = 2;
     internal const uint MONITOR_DEFAULTTOPRIMARY = 1;
 
+    internal const int GWL_STYLE = -16;
     internal const int GWL_EXSTYLE = -20;
+    internal const int WS_POPUP = unchecked((int)0x80000000);
+    internal const int WS_SYSMENU = 0x00080000;
+    internal const int WS_EX_TOPMOST = 0x00000008;
     internal const int WS_EX_TRANSPARENT = 0x00000020;
     internal const int WS_EX_TOOLWINDOW = 0x00000080;
+    internal const int WS_EX_APPWINDOW = 0x00040000;
+    internal const int WS_EX_NOREDIRECTIONBITMAP = 0x00200000;
     internal const int WS_EX_NOACTIVATE = 0x08000000;
+
+    internal const int HTTRANSPARENT = -1;
+    internal const int MA_NOACTIVATE = 3;
+    internal const int ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
 
     internal const uint SWP_NOSIZE = 0x0001;
     internal const uint SWP_NOZORDER = 0x0004;
     internal const uint SWP_NOACTIVATE = 0x0010;
+    internal const uint SWP_SHOWWINDOW = 0x0040;
+    internal const uint SWP_HIDEWINDOW = 0x0080;
+    internal const uint SWP_NOOWNERZORDER = 0x0200;
 
     internal const int SM_CXSMICON = 49;
     internal const uint GA_ROOT = 2;
@@ -239,14 +255,12 @@ internal static class User32
     internal static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
-    internal static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+    internal static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -256,11 +270,11 @@ internal static class User32
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
-    [DllImport("user32.dll")]
-    internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    internal static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
 
-    [DllImport("user32.dll")]
-    internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    internal static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
     [DllImport("user32.dll")]
     internal static extern int GetSystemMetrics(int nIndex);
@@ -336,9 +350,6 @@ internal static class Kernel32
     [DllImport("kernel32.dll")]
     internal static extern IntPtr GetCurrentProcess();
 
-    [DllImport("kernel32.dll")]
-    internal static extern uint GetCurrentThreadId();
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
@@ -346,8 +357,7 @@ internal static class Kernel32
 
 internal static class DwmApi
 {
-    internal const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
-    internal const int DWMWCP_DONOTROUND = 1;
+    internal const int DWMWA_USE_HOSTBACKDROPBRUSH = 17;
 
     [DllImport("dwmapi.dll")]
     internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);

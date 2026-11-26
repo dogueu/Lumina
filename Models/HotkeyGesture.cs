@@ -78,7 +78,6 @@ public sealed record HotkeyGesture(uint Modifiers, uint VirtualKey)
         var key = KeyInterop.KeyFromVirtualKey((int)vk);
         if (key >= Key.D0 && key <= Key.D9) return ((int)(key - Key.D0)).ToString();
         if (key >= Key.NumPad0 && key <= Key.NumPad9) return "Num " + (int)(key - Key.NumPad0);
-        if (key >= Key.F1 && key <= Key.F24) return key.ToString();
         return key.ToString();
     }
 }

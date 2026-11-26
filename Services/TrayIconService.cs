@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Threading;
@@ -11,8 +10,6 @@ namespace Lumina.Services;
 /// <para>
 /// Shell, tepsi ikonlarına fare tekerleği mesajı göndermez. Bu yüzden hafif bir WH_MOUSE_LL hook'u
 /// kurulur: callback yalnızca WM_MOUSEWHEEL'i inceler, diğer tüm mesajlarda anında geri döner.
-/// İkon dikdörtgeni (Shell_NotifyIconGetRect) kısa süreli önbelleğe alınır; böylece başka yerlerde
-/// kaydırma yaparken shell'e sürekli sorgu gitmez.
 /// </para>
 /// </summary>
 internal sealed class TrayIconService : IDisposable
@@ -21,6 +18,9 @@ internal sealed class TrayIconService : IDisposable
     private const uint IconId = 1;
     private const int WheelNotch = 120;
     private const long RectCacheMs = 400;
+    private const int MaxTooltipLength = 127;
+    private const int MaxAddRetries = 20;
+    private const int RetryIntervalMs = 500;
 
     private static readonly string[] TrayWindowClasses =
     {
@@ -41,6 +41,8 @@ internal sealed class TrayIconService : IDisposable
     private bool _versionFour;
     private string _tooltip = "Lumina";
 
+    private DispatcherTimer? _retryTimer;
+    private int _retryCount;
     private int _wheelRemainder;
     private RECT _cachedRect;
     private bool _cachedRectValid;
@@ -73,6 +75,8 @@ internal sealed class TrayIconService : IDisposable
 
     public void SetTooltip(string text)
     {
+        if (text.Length > MaxTooltipLength)
+            text = text[..MaxTooltipLength];
         _tooltip = text;
         if (_added) Modify();
     }
@@ -103,7 +107,7 @@ internal sealed class TrayIconService : IDisposable
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Lumina] Shell_NotifyIconGetRect hatası: {ex.Message}");
+            AppDiagnostics.Trace($"Shell_NotifyIconGetRect hatası: {ex.Message}");
         }
 
         rect = default;
@@ -131,12 +135,37 @@ internal sealed class TrayIconService : IDisposable
         _added = Shell32.Shell_NotifyIcon(Shell32.NIM_ADD, ref data);
         if (!_added)
         {
-            Debug.WriteLine("[Lumina] Tepsi ikonu eklenemedi.");
+            AppDiagnostics.Trace("Tepsi ikonu eklenemedi, yeniden denenecek.");
+            ScheduleAddRetry();
             return;
         }
 
+        _retryTimer?.Stop();
         data.uTimeoutOrVersion = Shell32.NOTIFYICON_VERSION_4;
         _versionFour = Shell32.Shell_NotifyIcon(Shell32.NIM_SETVERSION, ref data);
+    }
+
+    private void ScheduleAddRetry()
+    {
+        if (_retryCount >= MaxAddRetries) return;
+        if (_retryTimer is null)
+        {
+            _retryTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(RetryIntervalMs)
+            };
+            _retryTimer.Tick += (_, _) =>
+            {
+                _retryTimer.Stop();
+                if (!_added)
+                {
+                    _retryCount++;
+                    AddIcon();
+                }
+            };
+        }
+        _retryTimer.Stop();
+        _retryTimer.Start();
     }
 
     private void Modify()
@@ -204,13 +233,13 @@ internal sealed class TrayIconService : IDisposable
         if (_hook != IntPtr.Zero) return;
         _hook = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, _hookProc, Kernel32.GetModuleHandle(null), 0);
         if (_hook == IntPtr.Zero)
-            Debug.WriteLine($"[Lumina] Fare hook'u kurulamadı: {Marshal.GetLastWin32Error()}");
+            AppDiagnostics.Trace($"Fare hook'u kurulamadı: {Marshal.GetLastWin32Error()}");
     }
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         // Sıcak yol: hareket/tıklama mesajlarında hiçbir iş yapmadan dön.
-        if (nCode >= 0 && (int)wParam == User32.WM_MOUSEWHEEL)
+        if (nCode >= 0 && (int)wParam == User32.WM_MOUSEWHEEL && !_dispatcher.HasShutdownStarted)
         {
             try
             {
@@ -227,7 +256,7 @@ internal sealed class TrayIconService : IDisposable
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Lumina] Hook hatası: {ex.Message}");
+                AppDiagnostics.Trace($"Hook hatası: {ex.Message}");
             }
         }
 
@@ -282,6 +311,7 @@ internal sealed class TrayIconService : IDisposable
 
     public void Dispose()
     {
+        _retryTimer?.Stop();
         if (_hook != IntPtr.Zero)
         {
             User32.UnhookWindowsHookEx(_hook);

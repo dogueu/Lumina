@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Lumina.Models;
 using Lumina.Native;
 
@@ -7,61 +6,95 @@ namespace Lumina.Services;
 /// <summary>
 /// DDC/CI (Dxva2) üzerinden dinamik monitör listeleme ve parlaklık yazma.
 /// <list type="bullet">
-/// <item>Tüm P/Invoke çağrıları thread-pool'da çalışır; UI thread'i asla bloklanmaz.</item>
+/// <item>Tüm P/Invoke çağrıları thread-pool'da çalışır; UI thread'i bloklanmaz.</item>
 /// <item>I2C yolu tek seferde tek komut kabul ettiği için donanım erişimi <see cref="_bus"/> ile sıralanır.</item>
-/// <item>Slider sürüklenirken gelen istekler "son değer kazanır" mantığıyla birleştirilir (coalescing);
-/// böylece kuyruk birikmez ve parlaklık gecikmeden son değere ulaşır.</item>
-/// <item>Her komut try/catch + kısa süreli retry (artan bekleme) ile sarılıdır.</item>
+/// <item>Slider sürüklenirken gelen istekler "son değer kazanır" mantığıyla birleştirilir (coalescing).</item>
+/// <item>Her komut try/catch + artan süreli tekrar deneme ile sarılıdır.</item>
 /// </list>
 /// </summary>
 internal sealed class DdcMonitorService : IDisposable
 {
     private const int MaxAttempts = 3;
     private const int RetryDelayMs = 40;
+    private const int ReadToWriteTurnaroundMs = 40;
+    private const int DisposeWaitMs = 500;
 
     private readonly SemaphoreSlim _bus = new(1, 1);
     private readonly object _gate = new();
     private readonly Dictionary<string, int> _pending = new();
 
-    private List<DdcMonitor> _monitors = new();   // yalnızca _bus altında okunur/yazılır
+    private List<DdcMonitor> _monitors = new();
     private bool _workerRunning;
     private volatile bool _disposed;
 
-    /// <summary>Bir monitöre yazma tüm denemelere rağmen başarısız olursa tetiklenir (thread-pool'dan).</summary>
     public event Action<string>? ApplyFailed;
 
     // ---------------------------------------------------------------- Listeleme
 
     /// <summary>Bağlı DDC/CI uyumlu monitörleri yeniden listeler ve mevcut parlaklıklarını okur.</summary>
-    public Task<IReadOnlyList<MonitorSnapshot>> RefreshAsync() => Task.Run(async () =>
+    public Task<IReadOnlyList<MonitorSnapshot>> RefreshAsync(CancellationToken ct = default) => Task.Run(async () =>
     {
-        await _bus.WaitAsync().ConfigureAwait(false);
+        if (_disposed || ct.IsCancellationRequested)
+            return (IReadOnlyList<MonitorSnapshot>)Array.Empty<MonitorSnapshot>();
+
         try
         {
+            await _bus.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            return Array.Empty<MonitorSnapshot>();
+        }
+
+        try
+        {
+            if (_disposed || ct.IsCancellationRequested)
+                return Array.Empty<MonitorSnapshot>();
+
             ReleaseHandles();
 
             var found = new List<DdcMonitor>();
             var snapshots = new List<MonitorSnapshot>();
+            var rawMonitors = EnumeratePhysicalMonitors();
 
-            foreach (var monitor in EnumeratePhysicalMonitors())
+            for (int i = 0; i < rawMonitors.Count; i++)
             {
+                if (_disposed || ct.IsCancellationRequested)
+                {
+                    for (int k = i; k < rawMonitors.Count; k++)
+                        DestroyMonitorHandle(rawMonitors[k].Handle);
+                    foreach (var f in found)
+                        DestroyMonitorHandle(f.Handle);
+                    return Array.Empty<MonitorSnapshot>();
+                }
+
+                var monitor = rawMonitors[i];
                 (uint min, uint cur, uint max)? values = null;
                 try
                 {
                     values = await RetryAsync<(uint min, uint cur, uint max)>(() =>
                         Dxva2.GetMonitorBrightness(monitor.Handle, out var mn, out var c, out var mx)
                             ? (mn, c, mx)
-                            : null).ConfigureAwait(false);
+                            : null,
+                        ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    for (int k = i; k < rawMonitors.Count; k++)
+                        DestroyMonitorHandle(rawMonitors[k].Handle);
+                    foreach (var f in found)
+                        DestroyMonitorHandle(f.Handle);
+                    return Array.Empty<MonitorSnapshot>();
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[Lumina] Probe hatası ({monitor.Name}): {ex.Message}");
+                    AppDiagnostics.Trace($"Probe hatası ({monitor.Name}): {ex.Message}");
                 }
 
                 if (values is not { } v || v.max <= v.min)
                 {
-                    // DDC/CI desteklemiyor (ör. dizüstü iç paneli) – handle'ı bırak.
-                    Dxva2.DestroyPhysicalMonitor(monitor.Handle);
+                    // DDC/CI desteklemeyen panellerin handle'ını serbest bırak.
+                    DestroyMonitorHandle(monitor.Handle);
                     continue;
                 }
 
@@ -78,13 +111,27 @@ internal sealed class DdcMonitorService : IDisposable
             }
 
             _monitors = found;
+            if (found.Count > 0 && !ct.IsCancellationRequested && !_disposed)
+            {
+                // VESA DDC/CI standardı: GetMonitorBrightness okumasından hemen sonra gelen
+                // SetMonitorBrightness komutunun I2C kontrolcüsü tarafından yutulmaması için turnaround süresi.
+                try
+                {
+                    await Task.Delay(ReadToWriteTurnaroundMs, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // İptal edildiyse beklemeden dön; handle'lar _monitors içinde korunur/temizlenir.
+                }
+            }
             return (IReadOnlyList<MonitorSnapshot>)snapshots;
         }
         finally
         {
-            _bus.Release();
+            try { _bus.Release(); }
+            catch (ObjectDisposedException) { }
         }
-    });
+    }, ct);
 
     private readonly record struct RawMonitor(string Id, string Name, IntPtr Handle);
 
@@ -112,14 +159,19 @@ internal sealed class DdcMonitorService : IDisposable
         foreach (var hMonitor in hMonitors)
         {
             displayIndex++;
+            PHYSICAL_MONITOR[]? array = null;
+            int addedCount = 0;
             try
             {
                 if (!Dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
                     continue;
 
-                var array = new PHYSICAL_MONITOR[count];
+                array = new PHYSICAL_MONITOR[count];
                 if (!Dxva2.GetPhysicalMonitorsFromHMONITOR(hMonitor, count, array))
+                {
+                    array = null;
                     continue;
+                }
 
                 var info = new MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFOEX>() };
                 string device = User32.GetMonitorInfo(hMonitor, ref info) ? info.szDevice : $"DISPLAY{displayIndex}";
@@ -139,11 +191,17 @@ internal sealed class DdcMonitorService : IDisposable
                         : $"{device}#{i}";
 
                     result.Add(new RawMonitor(id, name, array[i].hPhysicalMonitor));
+                    addedCount++;
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Lumina] Monitör listeleme hatası: {ex.Message}");
+                AppDiagnostics.Trace($"Monitör listeleme hatası: {ex.Message}");
+                if (array is not null)
+                {
+                    for (int k = addedCount; k < array.Length; k++)
+                        DestroyMonitorHandle(array[k].hPhysicalMonitor);
+                }
             }
         }
 
@@ -153,17 +211,28 @@ internal sealed class DdcMonitorService : IDisposable
     private void ReleaseHandles()
     {
         foreach (var m in _monitors)
-        {
-            try { Dxva2.DestroyPhysicalMonitor(m.Handle); } catch { /* yoksay */ }
-        }
+            DestroyMonitorHandle(m.Handle);
         _monitors = new List<DdcMonitor>();
+    }
+
+    private static void DestroyMonitorHandle(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return;
+        try
+        {
+            Dxva2.DestroyPhysicalMonitor(handle);
+        }
+        catch (Exception ex)
+        {
+            AppDiagnostics.Trace($"Fiziksel monitör handle kapatılamadı: {ex.Message}");
+        }
     }
 
     // ---------------------------------------------------------------- Yazma
 
     /// <summary>
     /// Parlaklık isteğini kuyruğa alır ve hemen döner. Aynı monitör için biriken eski istekler atılır;
-    /// işçi görev boşta kalınca sonlanır (arka planda thread/bellek tutulmaz).
+    /// işçi görev boşta kalınca sonlanır.
     /// </summary>
     public void RequestBrightness(string monitorId, int percent)
     {
@@ -171,6 +240,7 @@ internal sealed class DdcMonitorService : IDisposable
 
         lock (_gate)
         {
+            if (_disposed) return;
             _pending[monitorId] = Math.Clamp(percent, 0, 100);
             if (_workerRunning) return;
             _workerRunning = true;
@@ -206,16 +276,28 @@ internal sealed class DdcMonitorService : IDisposable
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Lumina] Parlaklık yazma hatası: {ex.Message}");
+                AppDiagnostics.Trace($"Parlaklık yazma hatası: {ex.Message}");
             }
         }
     }
 
     private async Task ApplyAsync(string id, int percent)
     {
-        await _bus.WaitAsync().ConfigureAwait(false);
+        if (_disposed) return;
+
         try
         {
+            await _bus.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_disposed) return;
+
             var monitor = _monitors.Find(m => m.Id == id);
             if (monitor is null) return;
 
@@ -223,26 +305,28 @@ internal sealed class DdcMonitorService : IDisposable
             bool ok = await RetryAsync<bool>(() => Dxva2.SetMonitorBrightness(monitor.Handle, raw) ? true : null)
                 .ConfigureAwait(false) == true;
 
-            if (!ok)
+            if (!ok && !_disposed)
             {
-                Debug.WriteLine($"[Lumina] SetMonitorBrightness başarısız: {monitor.Name}");
+                AppDiagnostics.Trace($"SetMonitorBrightness başarısız: {monitor.Name}");
                 ApplyFailed?.Invoke(id);
             }
         }
         finally
         {
-            _bus.Release();
+            try { _bus.Release(); }
+            catch (ObjectDisposedException) { }
         }
     }
 
     /// <summary>
-    /// DDC/CI I2C yolu geçici olarak meşgul/gecikmeli olabilir: kısa artan beklemelerle tekrar dener.
-    /// İşlem null / false-benzeri dönerse veya istisna atarsa başarısız sayılır.
+    /// DDC/CI I2C yolu geçici olarak meşgul olabilir: artan beklemelerle tekrar dener.
     /// </summary>
-    private static async Task<T?> RetryAsync<T>(Func<T?> operation) where T : struct
+    private static async Task<T?> RetryAsync<T>(Func<T?> operation, CancellationToken ct = default) where T : struct
     {
         for (int attempt = 1; attempt <= MaxAttempts; attempt++)
         {
+            ct.ThrowIfCancellationRequested();
+
             try
             {
                 var result = operation();
@@ -250,11 +334,11 @@ internal sealed class DdcMonitorService : IDisposable
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Lumina] DDC/CI deneme {attempt} istisna: {ex.Message}");
+                AppDiagnostics.Trace($"DDC/CI deneme {attempt} istisna: {ex.Message}");
             }
 
             if (attempt < MaxAttempts)
-                await Task.Delay(RetryDelayMs * attempt).ConfigureAwait(false);
+                await Task.Delay(RetryDelayMs * attempt, ct).ConfigureAwait(false);
         }
 
         return null;
@@ -265,11 +349,25 @@ internal sealed class DdcMonitorService : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        // Donanım erişimi bitene kadar (kısa) bekle, ardından handle'ları kapat.
-        if (_bus.Wait(TimeSpan.FromSeconds(2)))
+        bool acquired = false;
+        try
         {
-            try { ReleaseHandles(); }
-            finally { _bus.Release(); }
+            acquired = _bus.Wait(TimeSpan.FromMilliseconds(DisposeWaitMs));
+            if (acquired)
+                ReleaseHandles();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Zaten serbest bırakılmış.
+        }
+        finally
+        {
+            if (acquired)
+            {
+                try { _bus.Release(); }
+                catch (ObjectDisposedException) { }
+            }
+            _bus.Dispose();
         }
     }
 }

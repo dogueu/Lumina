@@ -1,90 +1,219 @@
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using Lumina.Models;
 using Lumina.Native;
 using Lumina.Services;
 using Lumina.ViewModels;
-using Wpf.Ui.Appearance;
 
 namespace Lumina;
 
 /// <summary>
-/// Sistem tepsisi flyout'u (Windows 11 Hızlı Ayarlar benzeri):
-/// Görev çubuğunun hemen üzerinde sağ alt köşede açılır; odak kaybında veya dışarı tıklandığında kapanır.
+/// Sistem tepsisi flyout'u: ana monitör listesi ve aynı panel içinde sağdan kayarak açılan Ayarlar görünümü.
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const double SlideDistanceDip = 8;
-    private const double GapDip = 12; // Windows 11 flyout'larının görev çubuğuna boşluğu
-
-    private static readonly IEasingFunction EaseOut = new CubicEase { EasingMode = EasingMode.EaseOut };
-    private static readonly IEasingFunction EaseIn = new CubicEase { EasingMode = EasingMode.EaseIn };
+    private const int AutoHideGuardMs = 350;
+    private const int ShowHookDelayMs = 300;
+    private const int ShowDeactivateDelayMs = 450;
+    private const int ShowSlideOffsetDip = 16;
+    private const int HideSlideOffsetDip = 10;
+    private const double CornerRadiusDip = 8.0;
+    private const int TrayAnchorGapDip = 12;
 
     private readonly BrightnessController _controller;
-    private readonly Action _openSettings;
-    private readonly Func<int> _getStepPercent;
+    private readonly SettingsService _settings;
+    private readonly Func<HotkeyGesture, HotkeyGesture, string?> _updateHotkeys;
+    private readonly Func<bool, string?> _updateStartup;
+    private readonly Func<string?> _getHotkeyWarning;
 
+    private BlurUnderlay? _blur;
+    private RECT? _lastAnchorRect;
+    private IntPtr _hwnd;
+    private IntPtr _mouseHook;
+    private LowLevelMouseProc? _mouseHookProc;
     private bool _hiding;
-    private int _slideDirection = 1; // +1: aşağıdan yukarı, -1: yukarıdan aşağı
+    private bool _closing;
+    private bool _loadingSettings;
+    private bool _reorderingMonitors;
+    private int _animGen;
     private long _lastAutoHideTick;
     private long _showTick;
 
-    private IntPtr _mouseHook = IntPtr.Zero;
-    private LowLevelMouseProc? _mouseHookProc;
-
-    internal MainWindow(BrightnessController controller, Action openSettings, Func<int> getStepPercent)
-    {
-        InitializeComponent();
-
-        _controller = controller;
-        _openSettings = openSettings;
-        _getStepPercent = getStepPercent;
-        DataContext = controller;
-
-        Background = Brushes.Transparent;
-        Icon = IconFactory.RenderSun(64, Colors.White);
-
-        controller.PropertyChanged += (_, _) => UpdateEmptyState();
-        UpdateEmptyState();
-
-        Deactivated += OnDeactivated;
-        Closed += (_, _) => StopMouseHook();
-        SourceInitialized += (_, _) =>
-        {
-            var handle = new WindowInteropHelper(this).Handle;
-            int doNotRound = DwmApi.DWMWCP_DONOTROUND;
-            DwmApi.DwmSetWindowAttribute(handle, DwmApi.DWMWA_WINDOW_CORNER_PREFERENCE, ref doNotRound, sizeof(int));
-        };
-
-        ApplyFlyoutTheme();
-    }
-
     public bool IsOpen => IsVisible && !_hiding;
+    public bool IsShowingSettings => SettingsView.Visibility == Visibility.Visible;
 
     /// <summary>
     /// Görev çubuğu ikonuna tıklamak flyout'u önce odak kaybıyla kapatır, ardından tık gelir.
     /// Bu tıkın flyout'u yeniden açmasını engellemek için kısa süre yok sayılır.
     /// </summary>
-    public bool WasJustAutoHidden => Environment.TickCount64 - _lastAutoHideTick < 350;
+    public bool WasJustAutoHidden => Environment.TickCount64 - _lastAutoHideTick < AutoHideGuardMs;
 
-    internal void ShowFlyout(RECT? iconRect)
+    internal MainWindow(
+        BrightnessController controller,
+        SettingsService settings,
+        Func<HotkeyGesture, HotkeyGesture, string?> updateHotkeys,
+        Func<bool, string?> updateStartup,
+        Func<string?> getHotkeyWarning)
     {
+        _controller = controller;
+        _settings = settings;
+        _updateHotkeys = updateHotkeys;
+        _updateStartup = updateStartup;
+        _getHotkeyWarning = getHotkeyWarning;
+
+        InitializeComponent();
+        AllowsTransparency = true;
+
+        DataContext = controller;
+        Icon = IconFactory.RenderSun(64, Colors.White);
+
+        var ver = Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = ver is not null ? $"Lumina {ver.Major}.{ver.Minor}.{ver.Build}" : "Lumina";
+
+        WireSettings();
+        BackButton.Click += (_, _) => ShowSettings(false, animate: true);
+
+        _controller.PropertyChanged += OnControllerPropertyChanged;
+        _controller.Monitors.CollectionChanged += OnMonitorsChanged;
+
+        Closing += (_, _) =>
+        {
+            _closing = true;
+            StopMouseHook();
+        };
+        Deactivated += OnDeactivated;
+        Closed += (_, _) =>
+        {
+            StopMouseHook();
+            ThemeService.Changed -= OnThemeChanged;
+            _controller.PropertyChanged -= OnControllerPropertyChanged;
+            _controller.Monitors.CollectionChanged -= OnMonitorsChanged;
+        };
+        SizeChanged += (_, _) =>
+        {
+            if (IsVisible) PlaceNearTray();
+        };
+        SourceInitialized += (_, _) =>
+        {
+            _hwnd = new WindowInteropHelper(this).EnsureHandle();
+            ThemeService.MakeToolWindow(this);
+            _blur = BlurUnderlay.Attach(this);
+            ApplyTheme();
+        };
+        ThemeService.Changed += OnThemeChanged;
+
+        RenderMainState();
+    }
+
+    // ---------------------------------------------------------------- Yaşam döngüsü & konum
+
+    private void OnThemeChanged() => Dispatcher.BeginInvoke(() =>
+    {
+        if (_closing) return;
+        ApplyTheme();
+        RenderMainState();
+        if (IsShowingSettings) LoadSettings();
+    });
+
+    private void OnControllerPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        RenderMainState();
+    }
+
+    private void OnMonitorsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        RenderMainState();
+        if (IsShowingSettings && !_loadingSettings && !_reorderingMonitors)
+            PopulateMonitorSettings();
+    }
+
+    internal void ShowFlyout(RECT? iconRect, bool openInSettings = false)
+    {
+        if (_closing) return;
+
+        _animGen++;
         _showTick = Environment.TickCount64;
         _hiding = false;
+        _lastAnchorRect = iconRect;
 
-        ApplyFlyoutTheme();
+        ShowSettings(openInSettings, animate: false);
+        RenderMainState();
+        ApplyTheme();
 
-        CardTransform.BeginAnimation(TranslateTransform.YProperty, null);
-        FlyoutCard.BeginAnimation(OpacityProperty, null);
+        Slide.BeginAnimation(TranslateTransform.YProperty, null);
+        Body.BeginAnimation(OpacityProperty, null);
 
-        // Çıpa: tepsi ikonunun merkezi (yoksa imleç).
+        Body.Opacity = 0;
+        Slide.Y = ShowSlideOffsetDip;
+        if (!IsVisible) Show();
+        UpdateLayout();
+        PlaceNearTray();
+
+        Motion.Run(Slide, TranslateTransform.YProperty, ShowSlideOffsetDip, 0, 420, Motion.Out);
+        Motion.Run(Body, OpacityProperty, 0, 1, 260, Motion.Out);
+
+        StartMouseHook();
+
+        if (_hwnd == IntPtr.Zero)
+            _hwnd = new WindowInteropHelper(this).EnsureHandle();
+        User32.SetForegroundWindow(_hwnd);
+        Activate();
+        Focus();
+    }
+
+    internal void HideFlyout()
+    {
+        if (!IsVisible || _hiding || _closing) return;
+        StopMouseHook();
+
+        if (!Motion.Enabled)
+        {
+            Hide();
+            MemoryService.ScheduleTrim();
+            return;
+        }
+
+        _hiding = true;
+        int gen = ++_animGen;
+        Motion.Run(Slide, TranslateTransform.YProperty, null, HideSlideOffsetDip, 150, Motion.In);
+        Motion.Run(Body, OpacityProperty, null, 0, 150, Motion.In, () =>
+        {
+            if (!_hiding || _closing || gen != _animGen) return;
+            _hiding = false;
+            Slide.BeginAnimation(TranslateTransform.YProperty, null);
+            Body.BeginAnimation(OpacityProperty, null);
+            Hide();
+            MemoryService.ScheduleTrim();
+        });
+    }
+
+    internal void OpenSettings() => ShowSettings(true, animate: IsVisible);
+
+    private void ShowSettings(bool on, bool animate)
+    {
+        if (on) LoadSettings();
+
+        bool changed = (SettingsView.Visibility == Visibility.Visible) != on;
+        MainView.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        SettingsView.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+
+        if (!on) RenderMainState();
+        if (animate && changed && IsVisible)
+            Motion.EnterView(on ? SettingsView : MainView, on ? 1 : -1);
+    }
+
+    private void PlaceNearTray()
+    {
         POINT anchor;
-        if (iconRect is { } r)
+        if (_lastAnchorRect is { } r)
         {
             anchor = new POINT { X = (r.Left + r.Right) / 2, Y = (r.Top + r.Bottom) / 2 };
         }
@@ -94,15 +223,15 @@ public partial class MainWindow : Window
         }
 
         var area = ScreenHelper.GetMonitorAt(anchor.X, anchor.Y);
-
-        FlyoutCard.Opacity = 0;
-        if (!IsVisible) Show();
-        UpdateLayout();
-
-        // Gerçek boyuta göre en yakın köşeye hizala (DPI duyarlı)
         var dpi = VisualTreeHelper.GetDpi(this);
+
+        double workH = area.Work.Height / dpi.DpiScaleY;
+        Scroller.MaxHeight = Math.Max(200, workH - 160);
+        SettingsScroller.MaxHeight = Math.Max(200, workH - 150);
+
+        UpdateLayout();
         var (w, h) = ScreenHelper.GetPixelSize(this);
-        int gap = (int)Math.Round(GapDip * dpi.DpiScaleX);
+        int gap = (int)Math.Round(TrayAnchorGapDip * dpi.DpiScaleX);
 
         bool right = anchor.X >= area.Work.Left + area.Work.Width / 2;
         bool bottom = anchor.Y >= area.Work.Top + area.Work.Height / 2;
@@ -110,66 +239,63 @@ public partial class MainWindow : Window
         int x = right ? area.Work.Right - w - gap : area.Work.Left + gap;
         int y = bottom ? area.Work.Bottom - h - gap : area.Work.Top + gap;
 
-        // Hem WPF DIP koordinatlarını hem Win32 pencere konumunu tam ayarla
         Left = x / dpi.DpiScaleX;
         Top = y / dpi.DpiScaleY;
         ScreenHelper.MoveWindow(this, x, y);
 
-        _slideDirection = bottom ? 1 : -1;
-
-        // Akıcı açılış: içerik CardTransform üzerinden kayar (pencere koordinatı oynamaz, titreme olmaz)
-        double startY = _slideDirection * SlideDistanceDip;
-        CardTransform.Y = startY;
-
-        var slide = new DoubleAnimation(startY, 0, TimeSpan.FromMilliseconds(180))
-        {
-            EasingFunction = EaseOut,
-        };
-        var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
-        {
-            EasingFunction = EaseOut,
-        };
-
-        CardTransform.BeginAnimation(TranslateTransform.YProperty, slide);
-        FlyoutCard.BeginAnimation(OpacityProperty, fade);
-
-        // Dışarı tıklandığında anında kapanması için global fare dinleyicisini başlat
-        StartMouseHook();
-
-        // Odak kaybında kapanabilmesi ve aktif kalması için ön plana al
-        var handle = new WindowInteropHelper(this).EnsureHandle();
-        User32.SetForegroundWindow(handle);
-        Activate();
-        Focus();
+        _blur?.Update(CornerRadiusDip * dpi.DpiScaleX, ThemeService.BlurOpacity);
     }
 
-    internal void HideFlyout()
+    private void ApplyTheme()
     {
-        if (!IsVisible || _hiding) return;
-        _hiding = true;
-
-        StopMouseHook();
-
-        var duration = TimeSpan.FromMilliseconds(130);
-        var fade = new DoubleAnimation(FlyoutCard.Opacity, 0, duration) { EasingFunction = EaseIn };
-        var slide = new DoubleAnimation(CardTransform.Y, _slideDirection * SlideDistanceDip, duration)
-        {
-            EasingFunction = EaseIn,
-        };
-
-        fade.Completed += (_, _) =>
-        {
-            if (!_hiding) return;
-            _hiding = false;
-            CardTransform.BeginAnimation(TranslateTransform.YProperty, null);
-            FlyoutCard.BeginAnimation(OpacityProperty, null);
-            Hide();
-            MemoryService.ScheduleTrim();
-        };
-
-        CardTransform.BeginAnimation(TranslateTransform.YProperty, slide);
-        FlyoutCard.BeginAnimation(OpacityProperty, fade);
+        var dpi = VisualTreeHelper.GetDpi(this);
+        _blur?.Update(CornerRadiusDip * dpi.DpiScaleX, ThemeService.BlurOpacity);
     }
+
+    // ---------------------------------------------------------------- Ana görünüm durumu
+
+    private void RenderMainState()
+    {
+        bool refreshing = _controller.IsRefreshing;
+        bool hasMonitors = _controller.HasMonitors;
+
+        ReadingPill.Visibility = refreshing ? Visibility.Visible : Visibility.Collapsed;
+        RefreshButton.Visibility = refreshing ? Visibility.Collapsed : Visibility.Visible;
+
+        if (refreshing)
+        {
+            Spin.BeginAnimation(RotateTransform.AngleProperty,
+                new DoubleAnimation(0, 360, TimeSpan.FromSeconds(1)) { RepeatBehavior = RepeatBehavior.Forever });
+            SubtitleText.Text = "Monitörler taranıyor…";
+            SubtitleText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            Spin.BeginAnimation(RotateTransform.AngleProperty, null);
+            SubtitleText.Visibility = Visibility.Collapsed;
+        }
+
+        EmptyView.Visibility = hasMonitors ? Visibility.Collapsed : Visibility.Visible;
+        if (!hasMonitors)
+        {
+            EmptyBody.Text = refreshing
+                ? "Bağlı monitörler algılanıyor…"
+                : "DDC/CI destekleyen harici monitör bulunamadı. Monitör menüsünde DDC/CI seçeneğinin açık olduğundan emin olun.";
+            EmptyRefresh.Visibility = refreshing ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        int total = _controller.Monitors.Count;
+        int active = _controller.Monitors.Count(m => m.IsHotkeyEnabled);
+
+        FooterText.Text = total == 0
+            ? (refreshing ? "Taranıyor…" : "Monitör bağlı değil")
+            : $"{total} monitör bağlı";
+
+        LiveLegend.Visibility = active > 0 ? Visibility.Visible : Visibility.Collapsed;
+        LiveLegendText.Text = $"{active} kısayol aktif";
+    }
+
+    // ---------------------------------------------------------------- Fare & Kaydırıcı olayları
 
     private void StartMouseHook()
     {
@@ -177,6 +303,11 @@ public partial class MainWindow : Window
         _mouseHookProc = HookCallback;
         var hMod = Kernel32.GetModuleHandle(null);
         _mouseHook = User32.SetWindowsHookEx(User32.WH_MOUSE_LL, _mouseHookProc, hMod, 0);
+        if (_mouseHook == IntPtr.Zero)
+        {
+            _mouseHookProc = null;
+            AppDiagnostics.Trace($"Flyout fare hook'u kurulamadı: {Marshal.GetLastWin32Error()}");
+        }
     }
 
     private void StopMouseHook()
@@ -191,74 +322,39 @@ public partial class MainWindow : Window
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && IsOpen)
+        if (nCode >= 0 && IsOpen && !_closing && !Dispatcher.HasShutdownStarted
+            && Environment.TickCount64 - _showTick >= ShowHookDelayMs)
         {
-            // Açılış anındaki tıklama hareketini (ilk 300 ms) yok say; sadece açıldıktan sonraki dış tıklamaları yakala
-            if (Environment.TickCount64 - _showTick >= 300)
+            try
             {
                 int msg = (int)wParam;
                 if (msg is User32.WM_LBUTTONDOWN or User32.WM_RBUTTONDOWN or User32.WM_MBUTTONDOWN
-                        or User32.WM_NCLBUTTONDOWN or User32.WM_NCRBUTTONDOWN)
+                    or User32.WM_NCLBUTTONDOWN or User32.WM_NCRBUTTONDOWN)
                 {
                     var hookStruct = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-                    var handle = new WindowInteropHelper(this).Handle;
-                    if (handle != IntPtr.Zero && User32.GetWindowRect(handle, out var rect))
+                    if (_hwnd != IntPtr.Zero && User32.GetWindowRect(_hwnd, out var rect))
                     {
                         if (!rect.Contains(hookStruct.pt.X, hookStruct.pt.Y))
                         {
-                            // Dışarı tıklandı: flyout'u doğrudan kapat
                             _lastAutoHideTick = Environment.TickCount64;
                             Dispatcher.BeginInvoke(HideFlyout);
                         }
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                AppDiagnostics.Trace($"Flyout hook hatası: {ex.Message}");
+            }
         }
+
         return User32.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-    }
-
-    private void ApplyFlyoutTheme()
-    {
-        bool dark = ApplicationThemeManager.GetAppTheme() != ApplicationTheme.Light;
-        var bg = dark ? Color.FromRgb(0x23, 0x23, 0x23) : Color.FromRgb(0xF3, 0xF3, 0xF3);
-        var border = dark ? Color.FromArgb(0x20, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x1F, 0x00, 0x00, 0x00);
-        var fg = dark ? Colors.White : Color.FromRgb(0x1A, 0x1A, 0x1A);
-
-        Brush accentBrush;
-        try
-        {
-            accentBrush = ApplicationAccentColorManager.SystemAccentBrush;
-        }
-        catch
-        {
-            accentBrush = dark
-                ? new SolidColorBrush(Color.FromRgb(0x00, 0x5F, 0xB8))
-                : new SolidColorBrush(Color.FromRgb(0x00, 0x67, 0xC0));
-        }
-
-        var unfilledBrush = dark
-            ? new SolidColorBrush(Color.FromRgb(0x8A, 0x8A, 0x8D))
-            : new SolidColorBrush(Color.FromRgb(0xC4, 0xC4, 0xC4));
-
-        Resources["SystemAccentBrush"] = accentBrush;
-        Resources["SliderTrackUnfilledBrush"] = unfilledBrush;
-        Resources["SliderThumbCenterBrush"] = dark ? Brushes.White : Brushes.White;
-
-        Background = Brushes.Transparent;
-        FlyoutCard.Background = new SolidColorBrush(bg);
-        FlyoutCard.BorderBrush = new SolidColorBrush(border);
-        var fgBrush = new SolidColorBrush(fg);
-        Foreground = fgBrush;
-        TextElement.SetForeground(FlyoutCard, fgBrush);
     }
 
     private void OnDeactivated(object? sender, EventArgs e)
     {
-        if (!IsOpen) return;
-
-        // Açılışın hemen sonrasındaki (görev çubuğu fare bırakma, aktivasyon geçişleri)
-        // anlık odak kayıplarında pencerenin hemen kapanmasını engelle
-        if (Environment.TickCount64 - _showTick < 450) return;
+        if (_closing || !IsOpen) return;
+        if (Environment.TickCount64 - _showTick < ShowDeactivateDelayMs) return;
 
         _lastAutoHideTick = Environment.TickCount64;
         HideFlyout();
@@ -266,34 +362,30 @@ public partial class MainWindow : Window
 
     private void OnWindowKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape)
-        {
+        if (e.Key != Key.Escape) return;
+
+        if (IsShowingSettings)
+            ShowSettings(false, animate: true);
+        else
             HideFlyout();
-            e.Handled = true;
-        }
+
+        e.Handled = true;
     }
 
-    /// <summary>
-    /// Kullanıcı kaydırıcıyı oynattıkça tetiklenir. Bekleme yok: değer yalnızca arka plan kuyruğuna yazılır,
-    /// donanım iletişimi (DDC/CI) UI thread'i dışında async olarak yürür.
-    /// </summary>
     private void OnSliderValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (!IsOpen || IsShowingSettings) return;
         if (sender is Slider { IsLoaded: true, DataContext: MonitorViewModel vm })
         {
             _controller.SetPercent(vm, (int)Math.Round(e.NewValue));
         }
     }
 
-    /// <summary>
-    /// Kaydırıcı veya monitör satırı üzerinde fare tekerleği çevrildiğinde parlaklığı adım kadar değiştirir.
-    /// Tıklamaya gerek kalmadan hover anında çalışır.
-    /// </summary>
     private void OnSliderMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: MonitorViewModel vm })
         {
-            int step = _getStepPercent();
+            int step = _settings.Current.StepPercent;
             int delta = e.Delta > 0 ? step : -step;
             _controller.SetPercent(vm, vm.Percent + delta);
             e.Handled = true;
@@ -302,17 +394,5 @@ public partial class MainWindow : Window
 
     private void OnRefreshClick(object sender, RoutedEventArgs e) => _ = _controller.RefreshAsync();
 
-    private void OnSettingsClick(object sender, RoutedEventArgs e)
-    {
-        HideFlyout();
-        _openSettings();
-    }
-
-    private void UpdateEmptyState()
-    {
-        EmptyText.Visibility = _controller.HasMonitors ? Visibility.Collapsed : Visibility.Visible;
-        EmptyText.Text = _controller.IsRefreshing
-            ? "Monitörler aranıyor…"
-            : "DDC/CI destekleyen harici monitör bulunamadı. Monitör menüsünde DDC/CI seçeneğinin açık olduğundan emin olun.";
-    }
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => ShowSettings(true, animate: true);
 }

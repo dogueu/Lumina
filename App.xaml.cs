@@ -1,18 +1,13 @@
-using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
 using System.Windows.Controls.Primitives;
-using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Lumina.Models;
 using Lumina.Native;
 using Lumina.Services;
 using Lumina.Views;
-using Wpf.Ui.Appearance;
-using Wpf.Ui.Controls;
 
 namespace Lumina;
 
@@ -23,6 +18,11 @@ namespace Lumina;
 public partial class App : Application
 {
     private const string SingleInstanceMutexName = @"Local\Lumina.SingleInstance.6F1B7E52";
+    private const int TrayClickDebounceMs = 350;
+    private const int TooltipDebounceMs = 300;
+    private const int DisplayChangeRefreshDelayMs = 500;
+    private const int PowerResumeRefreshDelayMs = 1500;
+    private const int StartupTrimDelaySeconds = 10;
 
     private Mutex? _mutex;
     private bool _ownsMutex;
@@ -35,13 +35,13 @@ public partial class App : Application
     private TrayIconService _tray = null!;
 
     private MainWindow? _flyout;
-    private SettingsWindow? _settingsWindow;
     private OsdWindow? _osd;
     private ContextMenu? _trayMenu;
 
     private DispatcherTimer? _tooltipTimer;
     private int _tooltipPercent;
     private string? _hotkeyWarning;
+    private long _lastTrayClickTick;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -50,7 +50,6 @@ public partial class App : Application
         _mutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out _ownsMutex);
         if (!_ownsMutex)
         {
-            // Zaten çalışıyor (aynı kısayolları iki kez kaydedemeyiz).
             _mutex.Dispose();
             _mutex = null;
             Shutdown();
@@ -59,22 +58,39 @@ public partial class App : Application
 
         DispatcherUnhandledException += (_, args) =>
         {
-            Debug.WriteLine($"[Lumina] Yakalanmamış hata: {args.Exception}");
-            args.Handled = true;
+            AppDiagnostics.RecordCrash("DispatcherUnhandledException", args.Exception);
+            if (!AppDiagnostics.IsFatal(args.Exception))
+                args.Handled = true;
         };
 
-        ApplicationThemeManager.ApplySystemTheme();
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            AppDiagnostics.RecordCrash("AppDomain.UnhandledException", args.ExceptionObject as Exception);
+
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            AppDiagnostics.RecordCrash("TaskScheduler.UnobservedTaskException", args.Exception);
+            args.SetObserved();
+        };
+
+        SessionEnding += (_, _) =>
+        {
+            _settings?.Flush();
+            Shutdown();
+        };
 
         _settings = new SettingsService();
         _settings.Load();
-        _startup = new StartupService();
-        SyncStartupRegistration();
 
-        _messageWindow = new MessageWindow();
-        _messageWindow.AddHook(OnWindowMessage);
+        ThemeService.Apply(
+            ThemeService.Parse(_settings.Current.Appearance),
+            _settings.Current.GlassOpacity,
+            _settings.Current.GlassBlur);
 
+        // Donanım parlaklık eşitlemesini beklemeden ilk milisaniyede arka planda başlat:
         _brightness = new BrightnessController();
         _brightness.SetCustomNames(_settings.Current.MonitorCustomNames);
+        _brightness.SetExcludedHotkeyMonitors(_settings.Current.ExcludedHotkeyMonitors);
+        _brightness.SetMonitorOrder(_settings.Current.MonitorOrder);
         _brightness.SetSavedBrightness(_settings.Current.MonitorBrightness, (id, val) =>
         {
             _settings.Current.MonitorBrightness[id] = val;
@@ -82,6 +98,13 @@ public partial class App : Application
         });
         _brightness.LevelChanged += OnLevelChanged;
         _brightness.Adjusted += OnAdjusted;
+        _ = _brightness.RefreshAsync();
+
+        _startup = new StartupService();
+        SyncStartupRegistration();
+
+        _messageWindow = new MessageWindow();
+        _messageWindow.AddHook(OnWindowMessage);
 
         _hotkeys = new HotkeyService(_messageWindow);
         _hotkeys.IncreaseRequested += () => _brightness.Adjust(+_settings.Current.StepPercent);
@@ -96,13 +119,18 @@ public partial class App : Application
         _tray.SetTooltip("Lumina");
         _tray.Show();
 
-        _ = _brightness.RefreshAsync();
-        MemoryService.ScheduleTrim(10);
+        MemoryService.ScheduleTrim(StartupTrimDelaySeconds);
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        MemoryService.Stop();
         _tooltipTimer?.Stop();
+
+        _flyout?.Close();
+        _osd?.Close();
+
+        _settings?.Flush();
         _tray?.Dispose();
         _hotkeys?.Dispose();
         _brightness?.Dispose();
@@ -117,22 +145,23 @@ public partial class App : Application
         base.OnExit(e);
     }
 
-    // ---------------------------------------------------------------- Tepsi etkileşimi
+    // ---------------------------------------------------------------- Tepsi etkileşimi & Flyout
 
-    private long _lastTrayClickTick;
+    private MainWindow CreateFlyout()
+    {
+        var prevMain = MainWindow;
+        var w = new MainWindow(_brightness, _settings, UpdateHotkeys, UpdateStartup, () => _hotkeyWarning);
+        MainWindow = prevMain;
+        return w;
+    }
 
     private void OnTrayLeftClick()
     {
         long now = Environment.TickCount64;
-        if (now - _lastTrayClickTick < 350) return;
+        if (now - _lastTrayClickTick < TrayClickDebounceMs) return;
         _lastTrayClickTick = now;
 
-        if (_flyout is null)
-        {
-            var prevMain = MainWindow;
-            _flyout = new MainWindow(_brightness, OpenSettings, () => _settings.Current.StepPercent);
-            MainWindow = prevMain;
-        }
+        _flyout ??= CreateFlyout();
 
         if (_flyout.IsOpen)
         {
@@ -155,23 +184,9 @@ public partial class App : Application
         User32.SetForegroundWindow(_messageWindow.Handle);
 
         _trayMenu ??= BuildTrayMenu();
-        UpdateTrayMenuTheme(_trayMenu);
         _trayMenu.Placement = PlacementMode.MousePoint;
         _trayMenu.StaysOpen = false;
         _trayMenu.IsOpen = true;
-    }
-
-    private void UpdateTrayMenuTheme(ContextMenu menu)
-    {
-        bool dark = ApplicationThemeManager.GetAppTheme() != ApplicationTheme.Light;
-        var fg = dark ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A));
-
-        menu.Resources["MenuCardBackground"] = new SolidColorBrush(dark ? Color.FromRgb(0x28, 0x28, 0x28) : Color.FromRgb(0xF9, 0xF9, 0xF9));
-        menu.Resources["MenuCardBorder"] = new SolidColorBrush(dark ? Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x18, 0x00, 0x00, 0x00));
-        menu.Resources["TrayMenuForeground"] = fg;
-        menu.Resources["TrayMenuHoverBackground"] = new SolidColorBrush(dark ? Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x0C, 0x00, 0x00, 0x00));
-        menu.Resources["TrayMenuPressedBackground"] = new SolidColorBrush(dark ? Color.FromArgb(0x10, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x06, 0x00, 0x00, 0x00));
-        menu.Resources["TrayMenuSeparatorBrush"] = new SolidColorBrush(dark ? Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x1A, 0x00, 0x00, 0x00));
     }
 
     private ContextMenu BuildTrayMenu()
@@ -180,125 +195,108 @@ public partial class App : Application
         if (TryFindResource("Win11TrayContextMenuStyle") is Style style)
             menu.Style = style;
 
-        menu.SetValue(System.Windows.Controls.Primitives.Popup.PopupAnimationProperty, System.Windows.Controls.Primitives.PopupAnimation.Fade);
-        UpdateTrayMenuTheme(menu);
+        menu.SetValue(Popup.PopupAnimationProperty, PopupAnimation.Fade);
 
-        menu.Items.Add(CreateMenuItem("Ayarlar", SymbolRegular.Settings24, OpenSettings));
-        menu.Items.Add(CreateMenuItem("Monitörleri yenile", SymbolRegular.ArrowSync24, () => _ = _brightness.RefreshAsync()));
+        menu.Items.Add(CreateMenuItem("Ayarlar", Icons.Sliders, OpenSettings));
+        menu.Items.Add(CreateMenuItem("Monitörleri yenile", Icons.Refresh, () => _ = _brightness.RefreshAsync()));
         menu.Items.Add(new Separator());
-        menu.Items.Add(CreateMenuItem("Çıkış", SymbolRegular.Dismiss24, () => Shutdown()));
+        menu.Items.Add(CreateMenuItem("Çıkış", Icons.Dismiss, () => Shutdown()));
         menu.Closed += (_, _) => MemoryService.ScheduleTrim();
         return menu;
     }
 
-    private static System.Windows.Controls.MenuItem CreateMenuItem(string header, SymbolRegular symbol, Action onClick)
+    private static MenuItem CreateMenuItem(string header, Geometry iconGeometry, Action onClick)
     {
-        var icon = new SymbolIcon
+        var path = new System.Windows.Shapes.Path
         {
-            Symbol = symbol,
-            FontSize = 16,
-            VerticalAlignment = VerticalAlignment.Center
+            Data = iconGeometry,
+            Width = 20,
+            Height = 20,
         };
-        icon.SetResourceReference(Control.ForegroundProperty, "TrayMenuForeground");
+        path.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "Text.Primary");
 
-        var item = new System.Windows.Controls.MenuItem
+        var iconBox = new Viewbox
+        {
+            Width = 15,
+            Height = 15,
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = path,
+        };
+
+        var item = new MenuItem
         {
             Header = header,
-            Icon = icon
+            Icon = iconBox,
         };
-        item.SetResourceReference(Control.ForegroundProperty, "TrayMenuForeground");
         item.Click += (_, _) => onClick();
         return item;
     }
 
-    // ---------------------------------------------------------------- Pencereler
+    // ---------------------------------------------------------------- Ayar geri çağrıları
 
     private void OpenSettings()
     {
-        if (_settingsWindow is not null)
-        {
-            if (_settingsWindow.WindowState == WindowState.Minimized)
-                _settingsWindow.WindowState = WindowState.Normal;
-            _settingsWindow.Activate();
-            var handle = new WindowInteropHelper(_settingsWindow).Handle;
-            if (handle != IntPtr.Zero) User32.SetForegroundWindow(handle);
-            return;
-        }
+        _flyout ??= CreateFlyout();
 
-        _settingsWindow = new SettingsWindow(_settings.Current.Clone(), _brightness.Monitors, ApplySettings, _hotkeyWarning);
-        MainWindow = _settingsWindow;
-        _settingsWindow.Closing += (_, _) =>
-        {
-            if (_settingsWindow.WindowState == WindowState.Normal)
-            {
-                _settings.Current.SettingsWindowWidth = _settingsWindow.ActualWidth;
-                _settings.Current.SettingsWindowHeight = _settingsWindow.ActualHeight;
-                _settings.Save(_settings.Current);
-            }
-        };
-        _settingsWindow.Closed += (_, _) =>
-        {
-            if (ReferenceEquals(MainWindow, _settingsWindow))
-                MainWindow = null;
-            _settingsWindow = null;
-            MemoryService.ScheduleTrim();
-        };
-        _settingsWindow.Show();
-        _settingsWindow.Activate();
-        var h = new WindowInteropHelper(_settingsWindow).Handle;
-        if (h != IntPtr.Zero) User32.SetForegroundWindow(h);
+        if (!_brightness.HasMonitors && !_brightness.IsRefreshing)
+            _ = _brightness.RefreshAsync();
+
+        if (_flyout.IsOpen)
+            _flyout.OpenSettings();
+        else
+            _flyout.ShowFlyout(_tray.TryGetIconRect(out var rect) ? rect : null, openInSettings: true);
     }
 
-    /// <summary>Ayarlar penceresinden gelen yeni ayarları uygular; hata varsa mesajını döndürür.</summary>
-    private string? ApplySettings(AppSettings settings)
+    private string? UpdateHotkeys(HotkeyGesture increase, HotkeyGesture decrease)
     {
         var previous = _settings.Current;
-
-        var result = _hotkeys.Register(settings.IncreaseHotkey, settings.DecreaseHotkey);
+        var result = _hotkeys.Register(increase, decrease);
         if (!result.Success)
         {
             string error = _hotkeys.LastError ?? "Kısayollar kaydedilemedi.";
-            _hotkeys.Register(previous.IncreaseHotkey, previous.DecreaseHotkey); // eski haline döndür
+            _hotkeys.Register(previous.IncreaseHotkey, previous.DecreaseHotkey);
             _hotkeyWarning = _hotkeys.LastError;
             return error;
         }
 
         _hotkeyWarning = null;
+        return null;
+    }
 
-        string? startupError = null;
+    private string? UpdateStartup(bool enabled)
+    {
         try
         {
-            _startup.SetEnabled(settings.RunAtStartup);
+            _startup.SetEnabled(enabled);
+            _settings.Current.RunAtStartup = enabled;
+            _settings.Save(_settings.Current);
+            return null;
         }
         catch (Exception ex)
         {
-            settings.RunAtStartup = _startup.IsEnabled;
-            startupError = $"Başlangıç ayarı değiştirilemedi: {ex.Message}";
+            _settings.Current.RunAtStartup = _startup.IsEnabled;
+            return $"Başlangıç ayarı değiştirilemedi: {ex.Message}";
         }
-
-        if (!_settings.Save(settings)) return "Ayarlar dosyaya yazılamadı.";
-        _brightness.SetCustomNames(settings.MonitorCustomNames);
-        return startupError;
     }
 
     private void SyncStartupRegistration()
     {
         try
         {
-            // Uygulama taşındıysa Run anahtarındaki yol güncel tutulur.
+            // Uygulama taşındıysa veya başlangıç gecikmesi kapatılmamışsa kayıt güncel tutulur.
             if (_settings.Current.RunAtStartup && !_startup.IsPathCurrent)
                 _startup.SetEnabled(true);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Lumina] Başlangıç kaydı eşitlenemedi: {ex.Message}");
+            AppDiagnostics.Trace($"Başlangıç kaydı eşitlenemedi: {ex.Message}");
         }
     }
 
     private void OnAdjusted(int percent)
     {
         if (!_settings.Current.ShowOsd) return;
-        if (_flyout?.IsOpen == true) return; // kaydırıcılar zaten görünür
+        if (_flyout?.IsOpen == true && !_flyout.IsShowingSettings) return;
 
         if (_osd is null)
         {
@@ -318,12 +316,12 @@ public partial class App : Application
         {
             _tooltipTimer = new DispatcherTimer(DispatcherPriority.Background)
             {
-                Interval = TimeSpan.FromMilliseconds(300),
+                Interval = TimeSpan.FromMilliseconds(TooltipDebounceMs),
             };
             _tooltipTimer.Tick += (_, _) =>
             {
                 _tooltipTimer!.Stop();
-                _tray.SetTooltip(_brightness.HasMonitors ? $"Lumina — Parlaklık: {_tooltipPercent}%" : "Lumina");
+                _tray.SetTooltip(_brightness.HasActiveHotkeyMonitors ? $"Lumina — Parlaklık: {_tooltipPercent}" : "Lumina");
             };
         }
 
@@ -339,16 +337,19 @@ public partial class App : Application
         {
             case User32.WM_DISPLAYCHANGE:
                 // Monitör takıldı/çıkarıldı: DDC/CI hazır olması için kısa süre bekle.
-                _brightness.ScheduleRefresh(TimeSpan.FromMilliseconds(1500));
+                _brightness.ScheduleRefresh(TimeSpan.FromMilliseconds(DisplayChangeRefreshDelayMs));
                 break;
 
             case User32.WM_POWERBROADCAST when (int)wParam == User32.PBT_APMRESUMEAUTOMATIC:
-                _brightness.ScheduleRefresh(TimeSpan.FromSeconds(4));
+                _brightness.ScheduleRefresh(TimeSpan.FromMilliseconds(PowerResumeRefreshDelayMs));
                 break;
 
             case User32.WM_SETTINGCHANGE when lParam != IntPtr.Zero
-                                              && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet":
-                ApplicationThemeManager.ApplySystemTheme();
+                                              && Marshal.PtrToStringUni(lParam) is "ImmersiveColorSet" or "WindowsThemeElement":
+                ThemeService.Apply(
+                    ThemeService.Parse(_settings.Current.Appearance),
+                    _settings.Current.GlassOpacity,
+                    _settings.Current.GlassBlur);
                 _tray.RefreshIcon();
                 break;
         }

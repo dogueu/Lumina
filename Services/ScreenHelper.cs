@@ -29,9 +29,9 @@ internal static class ScreenHelper
             if (Shcore.GetDpiForMonitor(hMon, Shcore.MDT_EFFECTIVE_DPI, out uint dpiX, out _) == 0 && dpiX > 0)
                 scale = dpiX / 96.0;
         }
-        catch
+        catch (Exception ex)
         {
-            // eski Windows sürümlerinde shcore yoksa 1.0 kalır
+            AppDiagnostics.Trace($"Monitör DPI okunamadı: {ex.Message}");
         }
 
         return new MonitorArea(info.rcMonitor, info.rcWork, scale);

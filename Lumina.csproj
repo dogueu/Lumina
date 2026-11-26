@@ -2,12 +2,21 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <RootNamespace>Lumina</RootNamespace>
     <AssemblyName>Lumina</AssemblyName>
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <Product>Lumina</Product>
+    <Description>Ultra-lightweight DDC/CI monitor brightness manager and OSD for Windows 10/11.</Description>
+    <Authors>dogueu</Authors>
+    <Copyright>Copyright (c) 2026 dogueu</Copyright>
+    <RepositoryUrl>https://github.com/dogueu/Lumina</RepositoryUrl>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Lumina.ico</ApplicationIcon>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
@@ -17,10 +26,14 @@
     <ServerGarbageCollector>false</ServerGarbageCollector>
     <TieredPGO>false</TieredPGO>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="WPF-UI" Version="4.3.0" />
+    <Resource Include="Fonts\Geist-SemiBold.ttf" />
   </ItemGroup>
 
 </Project>

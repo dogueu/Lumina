@@ -1,41 +1,47 @@
 using System.Windows;
-using System.Windows.Media.Animation;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
-using Lumina.Native;
 using Lumina.Services;
-using Wpf.Ui.Appearance;
-using Wpf.Ui.Controls;
 
 namespace Lumina.Views;
 
 /// <summary>
-/// Windows 11 ses göstergesine benzer, şeffaf, tıklanamayan ve odak almayan geçici parlaklık göstergesi.
+/// Şeffaf, tıklanamayan ve odak almayan geçici parlaklık göstergesi (OSD).
 /// </summary>
 public partial class OsdWindow : Window
 {
+    private const double CardWidthDip = 192;
+    private const double CardHeightDip = 46;
+    private const double BottomGapDip = 14;
     private static readonly TimeSpan VisibleFor = TimeSpan.FromMilliseconds(1600);
 
     private readonly DispatcherTimer _hideTimer = new() { Interval = VisibleFor };
+    private BlurUnderlay? _blur;
     private bool _fadingOut;
+    private int _animGen;
+    private double _currentScale = 1.0;
 
     public OsdWindow()
     {
         InitializeComponent();
-        Background = Brushes.Transparent;
 
-        if (Application.Current != null && ReferenceEquals(Application.Current.MainWindow, this))
-        {
+        if (Application.Current is not null && ReferenceEquals(Application.Current.MainWindow, this))
             Application.Current.MainWindow = null;
-        }
 
         SourceInitialized += (_, _) =>
         {
-            MakeClickThrough();
-            WindowBackdrop.RemoveBackdrop(this);
-            WindowBackdrop.RemoveBackground(this);
+            ThemeService.MakeToolWindow(this, noActivate: true, clickThrough: true);
+            _blur = BlurUnderlay.Attach(this);
+            UpdateBlur();
         };
+
+        ThemeService.Changed += OnThemeChanged;
+        Closed += (_, _) =>
+        {
+            _hideTimer.Stop();
+            ThemeService.Changed -= OnThemeChanged;
+        };
+
         _hideTimer.Tick += (_, _) =>
         {
             _hideTimer.Stop();
@@ -43,58 +49,67 @@ public partial class OsdWindow : Window
         };
     }
 
+    private void OnThemeChanged() => Dispatcher.BeginInvoke(UpdateBlur);
+
     public void ShowLevel(int percent)
     {
         percent = Math.Clamp(percent, 0, 100);
-        ApplyTheme();
 
-        Level.Value = percent;
+        FillCol.Width = new GridLength(percent, GridUnitType.Star);
+        RestCol.Width = new GridLength(100 - percent, GridUnitType.Star);
         PercentText.Text = percent.ToString();
-        SunIcon.Symbol = percent switch
-        {
-            < 34 => SymbolRegular.BrightnessLow24,
-            < 67 => SymbolRegular.WeatherSunny24,
-            _ => SymbolRegular.BrightnessHigh24,
-        };
 
-        bool isAlreadyShowing = IsVisible && !_fadingOut && Opacity > 0.05;
+        bool useBlur = ThemeService.Blur;
+        bool isAlreadyShowing = IsVisible && !_fadingOut && (useBlur ? CardBody.Opacity > 0.05 : Opacity > 0.05);
 
+        _animGen++;
         if (_fadingOut)
         {
             _fadingOut = false;
-            CardTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            BodyTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            CardBody.BeginAnimation(OpacityProperty, null);
             BeginAnimation(OpacityProperty, null);
         }
 
         if (!IsVisible)
         {
-            Opacity = 0;
-            CardTransform.Y = 6;
+            BodyTransform.Y = 6;
+            if (useBlur)
+            {
+                Opacity = 1;
+                CardBody.Opacity = 0;
+            }
+            else
+            {
+                CardBody.Opacity = 1;
+                Opacity = 0;
+            }
             Show();
             UpdateLayout();
             Reposition();
         }
 
+        UpdateBlur();
+
         if (!isAlreadyShowing)
         {
-            // Sadece ilk açılışta alttan hafif yükselme ve belirme (Windows 11 ile birebir)
-            CardTransform.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(160))
-                {
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                });
-
-            BeginAnimation(OpacityProperty,
-                new DoubleAnimation(1, TimeSpan.FromMilliseconds(140))
-                {
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                });
+            Motion.Run(BodyTransform, TranslateTransform.YProperty, 6, 0, 180, Motion.Out);
+            if (useBlur)
+            {
+                Opacity = 1;
+                Motion.Run(CardBody, OpacityProperty, 0, 1, 150, Motion.Out);
+            }
+            else
+            {
+                CardBody.Opacity = 1;
+                Motion.Run(this, OpacityProperty, 0, 1, 150, Motion.Out);
+            }
         }
         else
         {
-            // Zaten ekranda görünürken değer değişiyorsa ASLA yeniden zıplama
-            CardTransform.Y = 0;
+            BodyTransform.Y = 0;
             Opacity = 1;
+            CardBody.Opacity = 1;
         }
 
         _hideTimer.Stop();
@@ -104,86 +119,55 @@ public partial class OsdWindow : Window
     private void FadeOut()
     {
         _fadingOut = true;
-        var duration = TimeSpan.FromMilliseconds(180);
-        var easeIn = new CubicEase { EasingMode = EasingMode.EaseIn };
+        int gen = ++_animGen;
 
-        var fade = new DoubleAnimation(0, duration) { EasingFunction = easeIn };
-        var slide = new DoubleAnimation(CardTransform.Y, 6, duration) { EasingFunction = easeIn };
-
-        fade.Completed += (_, _) =>
+        if (!Motion.Enabled)
         {
-            if (!_fadingOut) return;
             _fadingOut = false;
-            BeginAnimation(OpacityProperty, null);
-            CardTransform.BeginAnimation(TranslateTransform.YProperty, null);
             Hide();
             MemoryService.ScheduleTrim();
-        };
+            return;
+        }
 
-        CardTransform.BeginAnimation(TranslateTransform.YProperty, slide);
-        BeginAnimation(OpacityProperty, fade);
+        void FinishFade()
+        {
+            if (!_fadingOut || gen != _animGen) return;
+            _fadingOut = false;
+            BeginAnimation(OpacityProperty, null);
+            CardBody.BeginAnimation(OpacityProperty, null);
+            BodyTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            Hide();
+            MemoryService.ScheduleTrim();
+        }
+
+        Motion.Run(BodyTransform, TranslateTransform.YProperty, null, 6, 160, Motion.In);
+        if (ThemeService.Blur)
+            Motion.Run(CardBody, OpacityProperty, null, 0, 160, Motion.In, FinishFade);
+        else
+            Motion.Run(this, OpacityProperty, null, 0, 160, Motion.In, FinishFade);
     }
 
-    private const double CardWidthDip = 192;
-    private const double CardHeightDip = 46;
-    private const double BottomGapDip = 14;
+    private void UpdateBlur()
+    {
+        double opacity = IsVisible ? ThemeService.BlurOpacity : 0;
+        _blur?.Update(8 * _currentScale, opacity);
+    }
 
-    /// <summary>Birincil monitörde, görev çubuğunun hemen üzerinde alt-orta konum (Windows 11 ses OSD'si ile birebir).</summary>
+    /// <summary>Birincil monitörde, görev çubuğunun hemen üzerinde alt-orta konum.</summary>
     private void Reposition()
     {
         var area = ScreenHelper.GetMonitorAt(0, 0, primary: true);
+        _currentScale = area.Scale > 0 ? area.Scale : 1.0;
 
         int cardCenterXPx = area.Work.Left + area.Work.Width / 2;
-        int x = cardCenterXPx - (int)Math.Round((CardWidthDip / 2) * area.Scale);
+        int x = cardCenterXPx - (int)Math.Round((CardWidthDip / 2) * _currentScale);
 
-        int cardBottomYPx = area.Work.Bottom - (int)Math.Round(BottomGapDip * area.Scale);
-        int y = cardBottomYPx - (int)Math.Round(CardHeightDip * area.Scale);
+        int cardBottomYPx = area.Work.Bottom - (int)Math.Round(BottomGapDip * _currentScale);
+        int y = cardBottomYPx - (int)Math.Round(CardHeightDip * _currentScale);
 
-        double scale = area.Scale > 0 ? area.Scale : 1.0;
-        Left = x / scale;
-        Top = y / scale;
+        Left = x / _currentScale;
+        Top = y / _currentScale;
 
         ScreenHelper.MoveWindow(this, x, y);
-    }
-
-    private void ApplyTheme()
-    {
-        bool dark = ApplicationThemeManager.GetAppTheme() != ApplicationTheme.Light;
-        var background = dark ? Color.FromRgb(0x2C, 0x2C, 0x2E) : Color.FromRgb(0xF3, 0xF3, 0xF3);
-        var foreground = dark ? Colors.White : Color.FromRgb(0x1A, 0x1A, 0x1A);
-        var trackColor = dark ? Color.FromRgb(0x9E, 0x9E, 0x9E) : Color.FromRgb(0xC0, 0xC0, 0xC0);
-
-        Brush accentBrush;
-        try
-        {
-            accentBrush = ApplicationAccentColorManager.SystemAccentBrush;
-        }
-        catch
-        {
-            accentBrush = dark
-                ? new SolidColorBrush(Color.FromRgb(0x00, 0x5F, 0xB8))
-                : new SolidColorBrush(Color.FromRgb(0x00, 0x67, 0xC0));
-        }
-
-        Card.Background = new SolidColorBrush(background);
-        Card.BorderBrush = Brushes.Transparent;
-        Card.BorderThickness = new Thickness(0);
-        Background = Brushes.Transparent;
-        WindowBackdrop.RemoveBackdrop(this);
-        WindowBackdrop.RemoveBackground(this);
-        var fg = new SolidColorBrush(foreground);
-        SunIcon.Foreground = fg;
-        PercentText.Foreground = fg;
-
-        Level.Background = new SolidColorBrush(trackColor);
-        Level.Foreground = accentBrush;
-    }
-
-    private void MakeClickThrough()
-    {
-        var handle = new WindowInteropHelper(this).Handle;
-        int style = User32.GetWindowLong(handle, User32.GWL_EXSTYLE);
-        User32.SetWindowLong(handle, User32.GWL_EXSTYLE,
-            style | User32.WS_EX_TRANSPARENT | User32.WS_EX_NOACTIVATE | User32.WS_EX_TOOLWINDOW);
     }
 }

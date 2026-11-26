@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Lumina.Native;
@@ -20,11 +19,7 @@ internal static class IconFactory
             double cx = s / 2.0;
             double cy = s / 2.0;
 
-            // Kullanıcı tarafından sağlanan minimalist güneş geometrisi:
-            // Merkez daire yarıçapı: 106 / 512
-            // Işın kalınlığı: 50 / 512
-            // Işın başlangıç merkezi: 182 / 512
-            // Işın bitiş merkezi: 230 / 512
+            // 512 birimlik minimalist güneş geometrisi oranları
             double sunR = s * (106.0 / 512.0);
             double innerR = s * (182.0 / 512.0);
             double outerR = s * (230.0 / 512.0);
@@ -39,10 +34,8 @@ internal static class IconFactory
             };
             pen.Freeze();
 
-            // Merkez daire
             dc.DrawEllipse(brush, null, new Point(cx, cy), sunR, sunR);
 
-            // 8 adet yuvarlatılmış kapsül ışın
             for (int i = 0; i < 8; i++)
             {
                 double angle = i * Math.PI / 4.0;
@@ -77,8 +70,9 @@ internal static class IconFactory
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
             return key?.GetValue("SystemUsesLightTheme") is int v && v == 1;
         }
-        catch
+        catch (Exception ex)
         {
+            AppDiagnostics.Trace($"Görev çubuğu teması okunamadı: {ex.Message}");
             return false;
         }
     }
@@ -105,15 +99,16 @@ internal static class IconFactory
         IntPtr hBitmap = Gdi32.CreateDIBSection(IntPtr.Zero, ref bmi, 0, out IntPtr ppvBits, IntPtr.Zero, 0);
         if (hBitmap == IntPtr.Zero) return IntPtr.Zero;
 
-        Marshal.Copy(pixels, 0, ppvBits, pixels.Length);
-
-        // 1bpp boş maske
-        int maskStride = ((w + 31) / 32) * 4;
-        byte[] maskBits = new byte[maskStride * h];
-        IntPtr hMask = Gdi32.CreateBitmap(w, h, 1, 1, maskBits);
-
+        IntPtr hMask = IntPtr.Zero;
         try
         {
+            Marshal.Copy(pixels, 0, ppvBits, pixels.Length);
+
+            int maskStride = ((w + 31) / 32) * 4;
+            byte[] maskBits = new byte[maskStride * h];
+            hMask = Gdi32.CreateBitmap(w, h, 1, 1, maskBits);
+            if (hMask == IntPtr.Zero) return IntPtr.Zero;
+
             var info = new ICONINFO
             {
                 fIcon = true,
@@ -126,8 +121,8 @@ internal static class IconFactory
         }
         finally
         {
+            if (hMask != IntPtr.Zero) Gdi32.DeleteObject(hMask);
             Gdi32.DeleteObject(hBitmap);
-            Gdi32.DeleteObject(hMask);
         }
     }
 }
